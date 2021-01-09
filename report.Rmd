@@ -1,0 +1,177 @@
+---
+title: "Predicting Exercise Movement Quality"
+author: "Andrew Holland"
+date: "07/01/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn=-1)
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(caret)
+library(rpart)
+library(rattle)
+library(pgmm)
+library(gbm)
+library(randomForest)
+library(corrplot)
+library(parallel)
+library(doParallel)
+
+training <- read_csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+testing <- read_csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+```
+
+## Executive Summary
+
+By applying 3 different machine learning methods to our dataset, we have produced a model which predicts the quality of exercise technique (a categorical scale with 5 possible scores).
+
+## Context
+
+Using data from [Groupware@LES](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har), we have a large number of different measurements, with a group of people performing exercises with varying levels of quality in their technique. These quality levels are divided into 5 categories, labelled A, B, C, D and E.
+
+From this range of measurements, we can train a model that can predict the technique quality category.
+
+## Methodology
+
+Considering data science principles, we have the question to answer ("Can we predict the quality of technique?") and we have our data.
+
+We will split our data into a training (75%) and testing (25%) datasets, to allow us to test our models on a suitable sized sample.
+
+Before beginning our modelling, we should first tidy our datasets, removing any unused/NA only columns, any columns that are simply identifiers (names, times etc) and also using the nearZeroVar() function, to identify and remove any columns with no or very low variance. 
+
+The next step will involve trying 3 different methods for modelling: random forests, decision trees and gbm (generalised boosted model). We will train these models using our training dataset, with 5-fold cross-validation used where applicable to test for out-of-sample accuracy during the training stage.
+
+With the three models trained, we can then apply them to our testing predictors, and assess the accuracy of each model. The best will be used to take the 20 question quiz.
+
+
+## Tidying
+
+```{r tidying, echo=T, message = FALSE}
+#import data
+training <- read_csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+testing <- read_csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+
+#separtate training dataset into a training and testing dataset
+inTrain <- createDataPartition(training$classe, p=.75, list=FALSE)
+trainSet <- training[inTrain,]
+testSet <- training[-inTrain,]
+
+#remove first 5 rows (these are just identifiers such as usernames and timestamps)
+trainSet <- trainSet[,-c(1:5)]
+testSet <- testSet[,-c(1:5)]
+
+#remove any near zero variance columns
+nsv <- nearZeroVar(trainSet)
+trainSet <- trainSet[, -nsv]
+testSet <- testSet[, -nsv]
+
+#remove NA columns
+na_count <- colSums(is.na(trainSet))
+na_names <- na_count[na_count == 0]
+na_names <- names(na_names)
+trainSet <- trainSet[,na_names]
+testSet <- testSet[,na_names]
+```
+
+## Correlation Analysis - Apply PCA?
+
+Our model has many predictors, and from a quick investigation of what the data represents source, many measurements are derived from or calculated using others (mean values, totals of x, y and z vectors etc). Looking at our correlation plot below, we have number of high corellation preditors. We could apply PCA to these columns, and reduce the dimensionality of the data, at the expense of interpretability. With less predictors to train a model with, we could also expect our model to be trained faster.
+
+```{r corrplot, echo=T, fig.align='center'}
+M <- cor(trainSet[,-54])
+diag(M) <- 0
+corrplot(M, order = "FPC", method = "color", type = "lower", 
+    tl.cex = 0.8, tl.col = rgb(0, 0, 0))
+```
+
+## Modelling
+
+### Random Forest (rf)
+
+(Note, we use the doParellel and parellel libraries to run our cross-validation in parellel and reduce processing times)
+
+```{r rfmodel1, echo = T}
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+trainControlinput <- trainControl(method = 'cv', number = 5, allowParallel = T)
+model1rf <- train(data=trainSet, classe ~ ., method='rf', trControl=trainControlinput)
+stopCluster(cluster)
+registerDoSEQ()
+
+model1rf$finalModel
+```
+
+We can use the varImp() function to see which predictors are more important for our outcome.
+
+```{r rfmodel2, echo=T, fig.align='center'}
+plot(varImp(model1rf))
+```
+
+Now, to test our model, we use it to predict the outcome of the testSet data, and compare it to the actual outcome.
+
+```{r rfmodel3, echo=T}
+predict1rf <- predict(model1rf, newdata = testSet)
+conf1rf <- confusionMatrix(predict1rf, as.factor(testSet$classe))  
+conf1rf
+```
+
+### Decision Trees (rpart)
+
+```{r rpartmodel1, echo = T}
+trainControlinput <- trainControl(method = 'cv', number = 5)
+model2rpart <- rpart(data=trainSet, classe~., method = "class")
+```
+
+We can plot this decision tree:
+
+```{r rpartmodel2, echo=T, fig.align='center'}
+rattle::fancyRpartPlot(model2rpart)
+```
+
+Now, to test our model, we use it to predict the outcome of the testSet data, and compare it to the actual outcome.
+
+```{r rpartmodel3, echo=T}
+predict2rpart <- predict(model2rpart, newdata = testSet, type = 'class')
+conf2rpart <- confusionMatrix(predict2rpart, as.factor(testSet$classe))
+conf2rpart
+```
+
+### Generalised Boosted Model (gbm)
+
+```{r gbmmodel1, echo = T, message=F}
+trainControlinput <- trainControl(method = 'cv', number = 5)
+model3gbm <- train(data=trainSet, classe ~ ., method='gbm', trControl=trainControlinput, verbose = FALSE)
+model3gbm
+```
+
+We can use the varImp() function to see which predictors are more important for our outcome.
+
+```{r gbmmodel2, echo=T, fig.align='center'}
+plot(varImp(model3gbm))
+```
+
+Now, to test our model, we use it to predict the outcome of the testSet data, and compare it to the actual outcome.
+
+```{r gbmmodel3, echo=T}
+predict3gbm <- predict(model3gbm, newdata = testSet)
+conf3gbm <- confusionMatrix(predict3gbm, as.factor(testSet$classe))
+conf3gbm
+```
+
+## Comparison and Decision
+
+With our 3 models trained and tested, we can now pick the best. We will choose the model with the highest accuracy against the testSet data.
+
+```{r test_acc, echo=T}
+acc_tab <- data.frame("Model Type" = c("random forest", "decision tree", "generalised boosted model"),
+                   "Accuracy"=c(conf1rf$overall[[1]], conf2rpart$overall[[1]], conf3gbm$overall[[1]])
+                   ) %>%
+    arrange(desc(Accuracy))
+acc_tab
+```
+
+The random forest model has the highest accuracy, and so we select this model, and will use its predictions to answer the 20 question quiz.
